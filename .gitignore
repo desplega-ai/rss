@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.local
+
+# Dependencies
+node_modules
+
+# Next.js
+.next
+out
+
+# Debug
+npm-debug.log*
+pnpm-debug.log*
+
+# Misc
+.DS_Store
+*.pem
