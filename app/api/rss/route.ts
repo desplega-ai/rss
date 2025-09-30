@@ -87,11 +87,14 @@ function generateRSS(broadcasts: BroadcastWithContent[]): string {
     })
     .join('\n');
 
+  const feedTitle = process.env.RSS_FEED_TITLE || 'Newsletter Feed';
+  const feedDescription = process.env.RSS_FEED_DESCRIPTION || 'RSS feed of newsletter broadcasts';
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
-    <title>Newsletter Feed</title>
-    <description>RSS feed of newsletter broadcasts</description>
+    <title>${escapeXml(feedTitle)}</title>
+    <description>${escapeXml(feedDescription)}</description>
     <link>${baseUrl}</link>
 ${items}
   </channel>
