@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { head } from '@vercel/blob';
 
+// Force dynamic rendering
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 interface Broadcast {
   id: string;
   audience_id: string;

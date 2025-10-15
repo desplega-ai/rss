@@ -4,6 +4,12 @@
 
 A Next.js API that converts [Resend](https://resend.com) newsletter broadcasts into an RSS feed with full HTML content. Built for [desplega.ai](https://desplega.ai) to give power users RSS access to our newsletter without maintaining a separate distribution system.
 
+## 🎉 Update: Resend API Improvement
+
+After posting about [the limitations we encountered](INITIAL_IMPLEMENTATION.md) on Hacker News, [Zeno Rocha](https://zenorocha.com/) (CEO of Resend) reached out and **updated the Broadcast API to include HTML content directly**. This allowed us to simplify the implementation by ~44% (262 → 146 lines) and make it much faster. Thanks Resend team! 🙏
+
+[Read about the initial implementation](INITIAL_IMPLEMENTATION.md) to see how user feedback can drive API improvements.
+
 ## Why This Exists
 
 At [desplega.ai](https://desplega.ai), we send newsletters via Resend. Some folks (looking at you, M) prefer RSS feeds over email. Instead of maintaining two separate systems, this API:
@@ -18,7 +24,7 @@ Perfect for teams using Resend who want to offer RSS without the hassle.
 ## Features
 
 - **Daily Auto-Sync**: Cron job fetches new broadcasts from Resend every day
-- **Incremental Updates**: Only fetches new emails after first run (~9s vs 4 minutes)
+- **Simple & Fast**: Direct HTML from Broadcast API (~14s sync time)
 - **Full HTML Content**: RSS feed includes complete email HTML (not just text)
 - **Individual Broadcast URLs**: Each email is viewable at `/api/broadcast/{id}`
 - **Smart Caching**: Uses Vercel Blob for fast RSS generation (no API calls)
@@ -30,8 +36,7 @@ Perfect for teams using Resend who want to offer RSS without the hassle.
 ```
 ┌─────────────┐
 │ Resend API  │
-│  Broadcasts │
-│    Emails   │
+│  Broadcasts │ ← Now includes HTML! 🎉
 └──────┬──────┘
        │
        │ Daily Cron (midnight UTC)
@@ -39,40 +44,30 @@ Perfect for teams using Resend who want to offer RSS without the hassle.
        ▼
 ┌──────────────────────────────┐
 │  1. Fetch audiences          │
-│  2. Fetch broadcasts         │
-│  3. Fetch emails (incremental)│
-│  4. Match emails → broadcasts│
-│  5. Convert HTML             │
+│  2. Fetch broadcasts list    │
+│  3. Fetch each broadcast     │
+│     (includes HTML + text)   │
+│  4. Convert HTML → Markdown  │
 └──────┬───────────────────────┘
        │
        │ Store in Vercel Blob
        │
        ▼
-┌──────────────────────┐
-│  rss_audiences       │
-│  rss_broadcasts      │
-│  rss_emails          │
-│  rss_broadcast_{id}  │
-│  rss_last_email_id   │
-└──────┬───────────────┘
+┌──────────────────────────┐
+│  rss_audiences           │
+│  rss_broadcasts          │
+│  rss_broadcast_{id}_info │ ← Full broadcast w/ HTML
+│  rss_broadcast_{id}_info_md │ ← Markdown version
+└──────┬───────────────────┘
        │
        │ Read from cache
        │
        ▼
 ┌──────────────────────┐
 │  /api/rss            │ ← RSS Feed
-│  /api/broadcast/{id} │ ← Individual emails
+│  /api/broadcast/{id} │ ← Individual broadcasts
 └──────────────────────┘
 ```
-
-### The Matching Logic
-
-Since Resend's broadcast API doesn't return email content (see [Problems](#problems--limitations)), we:
-
-1. Fetch broadcast metadata (subject, from address)
-2. Fetch all sent emails separately
-3. Match emails to broadcasts by comparing `subject` and `from` fields
-4. Store matched HTML content in blob storage
 
 ## Quick Start
 
@@ -222,16 +217,12 @@ Authorization: Bearer {CRON_SECRET}
 {
   "success": true,
   "audiences": 1,
-  "broadcasts": 3,
-  "newEmails": 0,
-  "totalEmails": 569
+  "broadcasts": 5
 }
 ```
 
 **Performance:**
-- First run: ~4 minutes (fetches all emails)
-- With new emails: ~1-2 minutes
-- No new emails: ~9 seconds
+- Typical sync: ~14 seconds (fetches broadcast details with HTML)
 
 ### `GET /api/broadcast/[id]`
 
@@ -242,25 +233,28 @@ Renders individual broadcast as HTML page.
 https://your-app.vercel.app/api/broadcast/fa8f0216-3d02-4543-ad86-5e92e3c27124
 ```
 
-## Problems & Limitations
+## History: From Limitation to Feature
 
-> ⚠️ **Resend API Limitation**: The Resend broadcasts API (`/broadcasts`) does not return the actual email content (`html` or `text` fields). This is explicitly documented in their API.
+### The Original Problem
 
-**Our Workaround:**
+Initially, Resend's broadcast API didn't return email content (HTML/text). We had to build a complex workaround involving email fetching and matching. This worked but was slow (~4 minutes) and complex (~262 lines of code).
 
-1. Fetch broadcast metadata (subject, from) via `/broadcasts/{id}`
-2. Fetch all sent emails via `/emails`
-3. Match emails to broadcasts by comparing `subject` and `from`
-4. Extract HTML content from matched emails
+[Read about the initial implementation →](INITIAL_IMPLEMENTATION.md)
 
-**Trade-offs:**
+### The Resolution
 
-- ✅ Works reliably with current Resend API
-- ✅ Incremental fetching keeps it fast
-- ⚠️ Rate limiting means slower first sync (~4 min for 370 emails)
-- ⚠️ Matching by subject+from is not 100% guaranteed (though works in practice)
+After we shared our experience on Hacker News, the Resend team (shoutout to Zeno!) **updated the Broadcast API to include HTML content directly**. This is a perfect example of how developer feedback can drive API improvements.
 
-**Future**: If Resend adds content to broadcast endpoints, we can simplify the matching logic significantly.
+**Impact:**
+- 🚀 44% code reduction (262 → 146 lines)
+- ⚡ 94% faster (~14s vs 4 min)
+- 🎯 No complex matching logic needed
+- 🧹 Simpler architecture
+
+### Current Limitations
+
+- **Rate Limiting**: Resend allows 2 API calls/second, so large broadcast lists may take time
+- **Vercel Blob**: Free tier has storage limits; consider S3 for larger deployments (see [Migration to S3](#migration-to-s3))
 
 ## Future Improvements
 
@@ -307,21 +301,19 @@ The code structure is designed to make this swap easy - all storage operations a
 
 Resend allows **2 API calls per second**. The cron job adds 500ms delays between calls to respect this limit.
 
-### Incremental Sync
-
-After the first run, the cron only fetches emails created after the last sync using the `before` query parameter. This dramatically reduces sync time from ~4 minutes to ~9 seconds when there are no new emails.
-
 ### Blob Storage Keys
 
 ```
-rss_audiences           # All audiences
-rss_broadcasts          # All broadcasts for target audience
-rss_emails              # All emails (growing list)
-rss_last_email_id       # Cursor for incremental sync
-rss_broadcast_{id}      # Individual broadcast with HTML
-rss_audience_{id}       # Individual audience (unused currently)
-rss_email_{id}          # Individual email (unused currently)
+rss_audiences                # All audiences
+rss_broadcasts               # All broadcasts for target audience
+rss_broadcast_{id}_info      # Full broadcast with HTML
+rss_broadcast_{id}_info_md   # Markdown version (for future use)
+rss_audience_{id}            # Individual audience (for reference)
 ```
+
+### Dynamic RSS Rendering
+
+The RSS endpoint uses `export const dynamic = 'force-dynamic'` to ensure it always fetches fresh data from Vercel Blob instead of serving a cached static version.
 
 ## Tech Stack
 

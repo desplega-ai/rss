@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { put, head } from '@vercel/blob';
+import { put } from '@vercel/blob';
 import TurndownService from 'turndown';
 
 const turndown = new TurndownService();
@@ -19,16 +19,14 @@ interface Broadcast {
   name?: string;
   subject?: string;
   from?: string;
+  html?: string;
+  text?: string;
+  reply_to?: string | null;
+  preview_text?: string;
+  status?: string;
   created_at: string;
   sent_at: string | null;
-}
-
-interface Email {
-  id: string;
-  from: string;
-  subject: string;
-  html?: string;
-  created_at: string;
+  scheduled_at?: string | null;
 }
 
 export async function GET(request: NextRequest) {
@@ -63,31 +61,13 @@ export async function GET(request: NextRequest) {
       await put(`rss_broadcast_${broadcast.id}`, JSON.stringify(broadcast), { access: 'public', addRandomSuffix: false, allowOverwrite: true });
     }
 
-    // 3. Fetch and store emails incrementally
-    const { newEmails, allEmails } = await fetchEmailsIncrementally(apiKey);
-
-    // Store updated email list
-    await put('rss_emails', JSON.stringify(allEmails), { access: 'public', addRandomSuffix: false, allowOverwrite: true });
-
-    // Store individual new emails
-    for (const email of newEmails) {
-      await put(`rss_email_${email.id}`, JSON.stringify(email), { access: 'public', addRandomSuffix: false, allowOverwrite: true });
-    }
-
-    // Store last email ID for next run
-    if (allEmails.length > 0) {
-      await put('rss_last_email_id', allEmails[0].id, { access: 'public', addRandomSuffix: false, allowOverwrite: true });
-    }
-
-    // 4. Match emails to broadcasts and store with markdown (only new ones)
-    await matchAndStore(broadcasts, newEmails, apiKey);
+    // 3. Fetch full broadcast details with HTML and convert to markdown
+    await fetchAndStoreBroadcastsWithHtml(broadcasts, apiKey);
 
     return NextResponse.json({
       success: true,
       audiences: audiences.length,
       broadcasts: broadcasts.length,
-      newEmails: newEmails.length,
-      totalEmails: allEmails.length,
     });
   } catch (error) {
     console.error('Cron job error:', error);
@@ -125,103 +105,22 @@ async function fetchBroadcasts(apiKey: string, audienceId: string): Promise<Broa
   return allBroadcasts.filter((b: Broadcast) => b.audience_id === audienceId);
 }
 
-async function fetchEmailsIncrementally(apiKey: string): Promise<{ newEmails: Email[]; allEmails: Email[] }> {
-  // Try to get existing emails and last email ID
-  let existingEmails: Email[] = [];
-  let lastEmailId: string | undefined;
-
-  try {
-    const emailsBlob = await head('rss_emails');
-    if (emailsBlob?.url) {
-      const response = await fetch(emailsBlob.url);
-      existingEmails = await response.json();
-    }
-  } catch (e) {
-    // No existing emails, first run
-  }
-
-  try {
-    const lastIdBlob = await head('rss_last_email_id');
-    if (lastIdBlob?.url) {
-      const response = await fetch(lastIdBlob.url);
-      lastEmailId = await response.text();
-    }
-  } catch (e) {
-    // No last ID stored
-  }
-
-  // Fetch new emails only
-  let newEmails: Email[] = [];
-  let hasMore = true;
-  let currentLastId = lastEmailId;
-
-  while (hasMore) {
-    const url: string = currentLastId
-      ? `https://api.resend.com/emails?limit=100&before=${currentLastId}`
-      : 'https://api.resend.com/emails?limit=100';
-
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-
-    if (!response.ok) throw new Error(`Failed to fetch emails: ${response.status}`);
-
-    const data = await response.json();
-    const emails = data.data || [];
-
-    if (emails.length === 0) break;
-
-    newEmails = newEmails.concat(emails);
-
-    // If we have a lastEmailId, stop when we've fetched enough new emails
-    // Otherwise on first run, keep paginating through all
-    if (lastEmailId) {
-      hasMore = false; // Only fetch one batch of new emails
-    } else {
-      hasMore = data.has_more || false;
-      if (hasMore && emails.length > 0) {
-        currentLastId = emails[emails.length - 1].id;
-      }
-    }
-
-    // Rate limit: 2 calls/sec
-    await sleep(500);
-  }
-
-  // Merge: new emails first (most recent), then existing
-  const allEmails = [...newEmails, ...existingEmails];
-
-  return { newEmails, allEmails };
-}
-
-async function matchAndStore(broadcasts: Broadcast[], emails: Email[], apiKey: string) {
+async function fetchAndStoreBroadcastsWithHtml(broadcasts: Broadcast[], apiKey: string) {
   for (const broadcast of broadcasts) {
-    // Fetch full broadcast details to get subject and from
+    // Fetch full broadcast details including HTML
     const broadcastDetails = await fetchBroadcastDetails(apiKey, broadcast.id);
 
-    if (!broadcastDetails || !broadcastDetails.subject || !broadcastDetails.from) continue;
-
-    // Find matching email by subject and from
-    const matchingEmail = emails.find(
-      (email) => email.subject === broadcastDetails.subject && email.from === broadcastDetails.from
-    );
-
-    if (!matchingEmail) continue;
-
-    // Fetch full email details to get HTML
-    const emailDetails = await fetchEmailDetails(apiKey, matchingEmail.id);
-
-    if (!emailDetails || !emailDetails.html) continue;
+    if (!broadcastDetails || !broadcastDetails.html) continue;
 
     // Store the full info with HTML
     await put(
       `rss_broadcast_${broadcast.id}_info`,
-      JSON.stringify({ ...broadcastDetails, html: emailDetails.html }),
+      JSON.stringify(broadcastDetails),
       { access: 'public', addRandomSuffix: false, allowOverwrite: true }
     );
 
     // Convert HTML to Markdown
-    const markdown = turndown.turndown(emailDetails.html);
+    const markdown = turndown.turndown(broadcastDetails.html);
 
     await put(
       `rss_broadcast_${broadcast.id}_info_md`,
@@ -233,21 +132,6 @@ async function matchAndStore(broadcasts: Broadcast[], emails: Email[], apiKey: s
 
 async function fetchBroadcastDetails(apiKey: string, broadcastId: string): Promise<Broadcast | null> {
   const response = await fetch(`https://api.resend.com/broadcasts/${broadcastId}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-
-  if (!response.ok) {
-    await sleep(500); // Rate limit even on error
-    return null;
-  }
-
-  const data = await response.json();
-  await sleep(500); // Rate limit: 2 calls/sec
-  return data;
-}
-
-async function fetchEmailDetails(apiKey: string, emailId: string): Promise<Email | null> {
-  const response = await fetch(`https://api.resend.com/emails/${emailId}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
 
